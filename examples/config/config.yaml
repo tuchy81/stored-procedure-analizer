@@ -1,0 +1,61 @@
+target_schemas: [APP_OWNER, BATCH_OWNER]
+exclude_name_patterns: ["^TMP_", "_BAK$", "^TEST_"]
+character_set:
+  source_db: AL32UTF8
+  target: UTF-8
+weights:
+  dependency:
+    ref_table: 1
+    fanout_sp: 3
+    fanin_sp: 2
+    fanin_app: 2
+    db_link: 10
+    trigger_caller: 5
+    scheduler_caller: 3
+    cross_schema_grant: 4
+  complexity:
+    loc_per_100: 1
+    branch: 1
+    cursor: 2
+    ref_cursor_out: 4
+    dynamic_sql_literal: 4
+    dynamic_sql_variable: 10
+    tx_control: 5
+    autonomous_tx: 10
+    oracle_feature: 5
+    out_param: 2
+    exception_handler: 1
+    global_pkg_var: 5
+    mutating_trigger_risk: 6
+quadrant:
+  d_threshold_pct: 60
+  c_threshold_pct: 60
+  boundary_band_pct: 5
+strategy_rules:
+  auto_simple:
+    max_loc: 50
+    max_branch: 3
+    max_cursor: 0
+    dynamic_sql: 0
+    db_link: 0
+  auto_assisted:
+    max_loc: 200
+    max_branch: 10
+    max_cursor: 2
+    dynamic_sql_literal: 3
+    db_link: 0
+calibration:
+  pilot_file: override/pilot_effort.csv
+  min_samples: 30
+  model: ridge
+  ridge_alpha: 1.0
+  interval: p50_p90
+parser:
+  primary: regex
+  fallback: regex
+  target_success_rate: 0.90
+graph:
+  community_algorithm: louvain
+  random_seed: 42
+security:
+  mask_dblink_host: false

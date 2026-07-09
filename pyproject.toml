@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sp-assessor"
+version = "0.1.0"
+description = "Oracle Stored Procedure → Backend Conversion Assessment Tool"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "sp-assessor contributors" }]
+dependencies = [
+    "typer>=0.12",
+    "pyyaml>=6.0",
+    "pandas>=2.2",
+    "networkx>=3.2",
+    "jinja2>=3.1",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+scoring = ["scikit-learn>=1.4", "numpy>=1.26", "scipy>=1.11"]
+viz = ["matplotlib>=3.8", "openpyxl>=3.1"]
+community = ["python-louvain>=0.16"]
+dev = ["pytest>=8.0", "pytest-cov>=4.1", "ruff>=0.4"]
+
+[project.scripts]
+sp-assessor = "sp_assessor.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sp_assessor*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
