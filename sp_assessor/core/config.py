@@ -1,6 +1,7 @@
 """Config 로더 및 스키마 검증."""
 from __future__ import annotations
 
+import typing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -118,16 +119,21 @@ class Config:
 
 
 def _dict_to_dataclass(data: dict[str, Any], cls: type) -> Any:
-    """중첩 dataclass 로 변환."""
+    """중첩 dataclass 로 변환.
+
+    `from __future__ import annotations` 로 인해 dataclass 필드의 `.type` 은
+    런타임에 문자열("ParserConfig")로만 남는다. `typing.get_type_hints` 로
+    실제 클래스 객체를 복원해야 중첩 dataclass 가 dict 그대로 남지 않는다.
+    """
     if data is None:
         return cls()
     kwargs = {}
-    hints = cls.__dataclass_fields__
-    for name, f in hints.items():
+    resolved_hints = typing.get_type_hints(cls)
+    for name, f in cls.__dataclass_fields__.items():
         if name not in data:
             continue
         value = data[name]
-        field_type = f.type
+        field_type = resolved_hints.get(name, f.type)
         if hasattr(field_type, "__dataclass_fields__"):
             kwargs[name] = _dict_to_dataclass(value, field_type)
         else:

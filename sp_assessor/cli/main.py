@@ -8,17 +8,27 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from sp_assessor.core.config import default_config, load_config
+from sp_assessor.core.config import Config, default_config, load_config
 from sp_assessor.core.logging import setup_stage_logger
 from sp_assessor.core.paths import ProjectPaths
-from sp_assessor.stages import s1_inventory, validate as validate_stage
+from sp_assessor.stages import (
+    diff as diff_stage,
+    override_lint as override_lint_stage,
+    s1_inventory,
+    s2_metrics,
+    s3_graph,
+    s4_scoring,
+    s5_report,
+    spike as spike_stage,
+    validate as validate_stage,
+)
 
 
 app = typer.Typer(add_completion=False, help="Oracle SP → Backend 전환평가 도구")
 console = Console()
 
 
-def _load(root: Path, config_path: Optional[Path]) -> tuple[ProjectPaths, "Config"]:
+def _load(root: Path, config_path: Optional[Path]) -> tuple[ProjectPaths, Config]:
     paths = ProjectPaths.from_root(root)
     paths.ensure()
     cfg_path = config_path or paths.config
@@ -73,8 +83,17 @@ def run(
     for st in stages_to_run:
         if st == "s1":
             s1_inventory.run(paths, cfg, logger)
+        elif st == "s2":
+            s2_metrics.run(paths, cfg, logger)
+        elif st == "s3":
+            s3_graph.run(paths, cfg, logger)
+        elif st == "s4":
+            s4_scoring.run(paths, cfg, logger)
+        elif st == "s5":
+            s5_report.run(paths, cfg, logger)
         else:
-            console.print(f"[yellow]stage {st}: not yet implemented (phase 2+)[/yellow]")
+            console.print(f"[red]unknown stage: {st} (valid: s1, s2, s3, s4, s5, all)[/red]")
+            raise typer.Exit(code=1)
 
     if tag:
         snap = paths.snapshot_dir(tag)
@@ -88,20 +107,48 @@ def run(
 @app.command()
 def spike(
     root: Path = typer.Option(Path.cwd(), "--root", "-r"),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c"),
 ) -> None:
-    """§0 선행 스파이크 (Phase 6 구현 예정)."""
-    console.print("[yellow]spike: not yet implemented (phase 6)[/yellow]")
+    """§0 선행 스파이크 (SP-1/SP-2/SP-3 임계 검증)."""
+    paths, cfg = _load(root, config_path)
+    logger = setup_stage_logger("spike", paths.logs_dir)
+    spike_stage.run(paths, cfg, logger)
+    console.print(f"[green]spike report: {paths.output_dir / '_spike' / 'spike_report.md'}[/green]")
 
 
 @app.command()
 def diff(
-    stage: str = typer.Option(..., "--stage"),
+    stage: str = typer.Option(..., "--stage", help="s1|s2|s3|s4"),
     from_tag: str = typer.Option(..., "--from"),
     to_tag: str = typer.Option(..., "--to"),
     root: Path = typer.Option(Path.cwd(), "--root", "-r"),
 ) -> None:
-    """스냅샷 간 diff (Phase 6 구현 예정)."""
-    console.print("[yellow]diff: not yet implemented (phase 6)[/yellow]")
+    """스냅샷 간 diff (§9)."""
+    paths, _ = _load(root, None)
+    try:
+        result = diff_stage.compute_diff(paths, stage, from_tag, to_tag)
+    except (ValueError, FileNotFoundError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold]diff {stage}: {from_tag} -> {to_tag}[/bold]")
+    console.print(f"[green]신규: {len(result.new_ids)}[/green]  "
+                 f"[red]삭제: {len(result.removed_ids)}[/red]  "
+                 f"[yellow]변경: {len(result.changed)}[/yellow]")
+
+    if result.new_ids:
+        console.print("\n[green]신규:[/green] " + ", ".join(result.new_ids))
+    if result.removed_ids:
+        console.print("\n[red]삭제:[/red] " + ", ".join(result.removed_ids))
+    if result.changed:
+        table = Table(title="변경")
+        table.add_column("SP_ID")
+        table.add_column("컬럼")
+        table.add_column(from_tag)
+        table.add_column(to_tag)
+        for c in result.changed:
+            table.add_row(c.key, c.column, str(c.old), str(c.new))
+        console.print(table)
 
 
 override_app = typer.Typer(help="override 파일 유틸")
@@ -112,8 +159,24 @@ app.add_typer(override_app, name="override")
 def override_lint(
     root: Path = typer.Option(Path.cwd(), "--root", "-r"),
 ) -> None:
-    """override 정합성/충돌 검사 (Phase 6 구현 예정)."""
-    console.print("[yellow]override lint: not yet implemented (phase 6)[/yellow]")
+    """override 정합성/충돌 검사 (§6)."""
+    paths, _ = _load(root, None)
+    report = override_lint_stage.lint(paths)
+
+    table = Table(title="Override Lint Report")
+    table.add_column("Level")
+    table.add_column("Code")
+    table.add_column("Message")
+    for f in report.findings:
+        color = {"ERROR": "red", "WARN": "yellow", "INFO": "cyan"}.get(f.level, "white")
+        table.add_row(f"[{color}]{f.level}[/{color}]", f.code, f.message)
+
+    if report.findings:
+        console.print(table)
+    else:
+        console.print("[green]✓ no findings[/green]")
+
+    raise typer.Exit(code=1 if report.has_errors else 0)
 
 
 if __name__ == "__main__":

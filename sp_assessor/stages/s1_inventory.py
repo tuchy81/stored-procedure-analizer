@@ -12,11 +12,17 @@ from sp_assessor.core.config import Config
 from sp_assessor.core.paths import ProjectPaths
 from sp_assessor.io.csv_io import read_csv, write_csv
 from sp_assessor.io.csv_schemas import OVERRIDE_SCHEMAS
+from sp_assessor.util.text import clean_str
 
 
 PKG_SUBPROG_RE = re.compile(
     r"^\s*(?:PROCEDURE|FUNCTION)\s+([A-Z_][A-Z0-9_$#]*)",
     re.IGNORECASE,
+)
+
+# `SCHEMA.OBJECT@DB_LINK` / `OBJECT@DB_LINK` 직접 참조 탐지 (§S1-5)
+DBLINK_REF_RE = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_$#.]*@([A-Za-z_][A-Za-z0-9_$#]*)\b"
 )
 
 
@@ -63,7 +69,7 @@ def _decompose_packages(objects: pd.DataFrame, sources: pd.DataFrame,
         pkg_args = arguments[arguments["PACKAGE_NAME"].astype(str).str.len() > 0]
         seen: set[tuple] = set()
         for _, arg in pkg_args.iterrows():
-            key = (arg["OWNER"], arg["PACKAGE_NAME"], arg["OBJECT_NAME"], arg.get("OVERLOAD") or "")
+            key = (arg["OWNER"], arg["PACKAGE_NAME"], arg["OBJECT_NAME"], clean_str(arg.get("OVERLOAD")))
             if key in seen:
                 continue
             seen.add(key)
@@ -188,15 +194,27 @@ def _compute_suspect_unused(inventory: pd.DataFrame, exec_stats: pd.DataFrame) -
     return inventory
 
 
-def _compute_remote_ref_count(inventory: pd.DataFrame, deps: pd.DataFrame) -> pd.DataFrame:
+def _compute_remote_ref_count(inventory: pd.DataFrame, deps: pd.DataFrame,
+                              dblink_refs: pd.DataFrame | None = None) -> pd.DataFrame:
     inventory["REMOTE_REF_COUNT"] = 0
-    if deps.empty or "REFERENCED_LINK_NAME" not in deps.columns:
+    if inventory.empty:
         return inventory
-    remote_deps = deps[deps["REFERENCED_LINK_NAME"].astype(str).str.len() > 0]
-    if remote_deps.empty:
-        return inventory
-    counts = remote_deps.groupby(["OWNER", "NAME"]).size().rename("cnt").reset_index()
-    lookup = {(r["OWNER"], r["NAME"]): int(r["cnt"]) for _, r in counts.iterrows()}
+
+    lookup: dict[tuple, int] = {}
+
+    if not deps.empty and "REFERENCED_LINK_NAME" in deps.columns:
+        remote_deps = deps[deps["REFERENCED_LINK_NAME"].astype(str).str.len() > 0]
+        if not remote_deps.empty:
+            counts = remote_deps.groupby(["OWNER", "NAME"]).size().rename("cnt").reset_index()
+            for _, r in counts.iterrows():
+                key = (r["OWNER"], r["NAME"])
+                lookup[key] = lookup.get(key, 0) + int(r["cnt"])
+
+    if dblink_refs is not None and not dblink_refs.empty:
+        counts = dblink_refs.groupby(["OWNER", "NAME"]).size().rename("cnt").reset_index()
+        for _, r in counts.iterrows():
+            key = (r["OWNER"], r["NAME"])
+            lookup[key] = lookup.get(key, 0) + int(r["cnt"])
 
     def lookup_fn(row):
         target = row["PKG"] if row["PKG"] else row["NAME"]
@@ -206,17 +224,126 @@ def _compute_remote_ref_count(inventory: pd.DataFrame, deps: pd.DataFrame) -> pd
     return inventory
 
 
-def _build_unresolved(deps: pd.DataFrame, synonyms: pd.DataFrame,
-                     objects: pd.DataFrame, target_schemas: list[str]) -> pd.DataFrame:
+@dataclass
+class SynonymMaps:
+    private: dict[tuple[str, str], dict]
+    public: dict[str, dict]
+
+    def resolve(self, schema: str, name: str) -> dict | None:
+        """private > public 우선순위로 시노님 실체 해석."""
+        hit = self.private.get((schema, name))
+        if hit is not None:
+            return hit
+        return self.public.get(name)
+
+
+def _resolve_synonyms(synonyms: pd.DataFrame) -> SynonymMaps:
+    """PUBLIC + private 시노님 병합. db_link 존재 시 REMOTE 실체로 태깅 (§S1-4)."""
+    private: dict[tuple[str, str], dict] = {}
+    public: dict[str, dict] = {}
+    if synonyms.empty:
+        return SynonymMaps(private, public)
+
+    for _, row in synonyms.iterrows():
+        db_link = clean_str(row.get("DB_LINK"))
+        entry = {
+            "TABLE_OWNER": row["TABLE_OWNER"],
+            "TABLE_NAME": row["TABLE_NAME"],
+            "DB_LINK": db_link,
+            "IS_REMOTE": bool(db_link),
+        }
+        owner = str(row["OWNER"]).strip()
+        name = str(row["SYNONYM_NAME"]).strip()
+        if owner.upper() == "PUBLIC":
+            public[name] = entry
+        else:
+            private[(owner, name)] = entry
+    return SynonymMaps(private, public)
+
+
+def _load_remote_objects(input_dir: Path) -> dict[str, set[tuple[str, str]]]:
+    """`in_remote_objects__{DB_LINK}.csv` 로딩 → {DB_LINK: {(OWNER, OBJECT_NAME), ...}} (§2.3/§9.4)."""
+    result: dict[str, set[tuple[str, str]]] = {}
+    if not input_dir.exists():
+        return result
+    for p in sorted(input_dir.glob("in_remote_objects__*.csv")):
+        link_name = p.stem[len("in_remote_objects__"):]
+        df = read_csv(p)
+        if df.empty or "OWNER" not in df.columns or "OBJECT_NAME" not in df.columns:
+            continue
+        result[link_name] = set(zip(df["OWNER"], df["OBJECT_NAME"]))
+    return result
+
+
+def _scan_source_dblinks(sources: pd.DataFrame) -> pd.DataFrame:
+    """소스 텍스트 내 `OBJECT@DB_LINK` 직접 참조 탐지 (§S1-5)."""
     rows: list[dict] = []
+    if sources.empty:
+        return pd.DataFrame(rows, columns=["OWNER", "NAME", "LINE", "DB_LINK"])
+    for _, line in sources.iterrows():
+        for m in DBLINK_REF_RE.finditer(str(line.get("TEXT", ""))):
+            rows.append({
+                "OWNER": line["OWNER"], "NAME": line["NAME"],
+                "LINE": line["LINE"], "DB_LINK": m.group(1),
+            })
+    return pd.DataFrame(rows, columns=["OWNER", "NAME", "LINE", "DB_LINK"])
+
+
+def _build_unresolved(deps: pd.DataFrame, synonyms: pd.DataFrame,
+                     objects: pd.DataFrame, target_schemas: list[str],
+                     synonym_maps: SynonymMaps | None = None,
+                     remote_objects: dict[str, set[tuple[str, str]]] | None = None,
+                     db_links: pd.DataFrame | None = None,
+                     dblink_refs: pd.DataFrame | None = None) -> pd.DataFrame:
+    rows: list[dict] = []
+    synonym_maps = synonym_maps or SynonymMaps({}, {})
+    remote_objects = remote_objects or {}
+
+    def _remote_resolved(link: str, owner: str, name: str) -> bool:
+        return (owner, name) in remote_objects.get(link, set())
 
     if not deps.empty and "REFERENCED_LINK_NAME" in deps.columns:
         remote = deps[deps["REFERENCED_LINK_NAME"].astype(str).str.len() > 0]
         for _, r in remote.iterrows():
+            link = r["REFERENCED_LINK_NAME"]
+            if _remote_resolved(link, r["REFERENCED_OWNER"], r["REFERENCED_NAME"]):
+                continue
             rows.append({
                 "SP_ID": _make_sp_id(r["OWNER"], None, r["NAME"], None),
                 "REASON_CODE": "UNRESOLVED_REMOTE",
-                "DETAIL": f"{r['REFERENCED_OWNER']}.{r['REFERENCED_NAME']}@{r['REFERENCED_LINK_NAME']}",
+                "DETAIL": f"{r['REFERENCED_OWNER']}.{r['REFERENCED_NAME']}@{link}",
+            })
+
+    if not deps.empty and "REFERENCED_TYPE" in deps.columns:
+        syn_deps = deps[deps["REFERENCED_TYPE"].astype(str).str.upper() == "SYNONYM"]
+        for _, r in syn_deps.iterrows():
+            resolved = synonym_maps.resolve(r["REFERENCED_OWNER"], r["REFERENCED_NAME"])
+            sp_id = _make_sp_id(r["OWNER"], None, r["NAME"], None)
+            if resolved is None:
+                rows.append({
+                    "SP_ID": sp_id,
+                    "REASON_CODE": "UNRESOLVED_SYNONYM",
+                    "DETAIL": f"{r['REFERENCED_OWNER']}.{r['REFERENCED_NAME']}",
+                })
+            elif resolved["IS_REMOTE"]:
+                if not _remote_resolved(resolved["DB_LINK"], resolved["TABLE_OWNER"], resolved["TABLE_NAME"]):
+                    rows.append({
+                        "SP_ID": sp_id,
+                        "REASON_CODE": "UNRESOLVED_REMOTE",
+                        "DETAIL": f"via synonym {r['REFERENCED_OWNER']}.{r['REFERENCED_NAME']} -> "
+                                  f"{resolved['TABLE_OWNER']}.{resolved['TABLE_NAME']}@{resolved['DB_LINK']}",
+                    })
+
+    if dblink_refs is not None and not dblink_refs.empty:
+        known_links = set()
+        if db_links is not None and not db_links.empty:
+            known_links = set(db_links["DB_LINK"].astype(str))
+        unknown = dblink_refs[~dblink_refs["DB_LINK"].isin(known_links)]
+        for (owner, name), grp in unknown.groupby(["OWNER", "NAME"]):
+            rows.append({
+                "SP_ID": _make_sp_id(owner, None, name, None),
+                "REASON_CODE": "UNKNOWN_DB_LINK",
+                "DETAIL": f"@{sorted(grp['DB_LINK'].unique())[0]} (source line {int(grp['LINE'].iloc[0])})",
             })
 
     if not objects.empty:
@@ -318,12 +445,19 @@ def run(paths: ProjectPaths, config: Config, logger: logging.Logger) -> dict:
     inventory = _detect_wrapped(inventory, sources)
     inventory = _compute_cross_schema_callable(inventory, tab_privs, role_privs, config.target_schemas)
     inventory = _compute_suspect_unused(inventory, exec_stats)
-    inventory = _compute_remote_ref_count(inventory, deps)
+
+    dblink_refs = _scan_source_dblinks(sources)
+    inventory = _compute_remote_ref_count(inventory, deps, dblink_refs)
 
     override_path = paths.override_dir / OVERRIDE_SCHEMAS["s1_inventory"].filename
     inventory, excluded = _apply_overrides(inventory, excluded, override_path, logger)
 
-    unresolved = _build_unresolved(deps, synonyms, targets, config.target_schemas)
+    synonym_maps = _resolve_synonyms(synonyms)
+    remote_objects = _load_remote_objects(paths.input_dir)
+    db_links = read_csv(paths.input_dir / "in_db_links.csv")
+    unresolved = _build_unresolved(deps, synonyms, targets, config.target_schemas,
+                                   synonym_maps=synonym_maps, remote_objects=remote_objects,
+                                   db_links=db_links, dblink_refs=dblink_refs)
     grant_matrix = _build_grant_matrix(tab_privs, role_privs)
 
     inv_cols = ["SP_ID", "OWNER", "PKG", "NAME", "OVERLOAD_NO", "TYPE", "LOC",
