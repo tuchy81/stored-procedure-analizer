@@ -158,3 +158,64 @@ def test_resolve_synonyms_private_over_public() -> None:
 
     resolved_public = maps.resolve("OTHER_OWNER", "X")
     assert resolved_public["TABLE_OWNER"] == "PUB_OWNER"
+
+
+# ---------------------------------------------------------------------------
+# 회귀 테스트: pandas 의 NaN.astype(str) 동작(문자열 dtype 백엔드/버전에 따라
+# "nan" 문자열로 변환되기도, NaN 그대로 남기도 함)에 의존하던 필터 버그.
+# `pd.option_context('future.infer_string', False)` 로 "NaN.astype(str) == 'nan'"
+# 이 되는 클래식 동작을 강제해, 설치된 pandas 버전과 무관하게 결정적으로 재현한다.
+# ---------------------------------------------------------------------------
+
+def test_decompose_packages_excludes_plain_sp_args_under_classic_pandas_dtype() -> None:
+    """PACKAGE_NAME 이 NaN 인 plain SP 인자 행이 패키지 서브프로그램으로 잘못
+    분류되면 _make_sp_id 가 NaN(float) 을 문자열 join 하려다 TypeError 로 죽는다."""
+    from sp_assessor.stages.s1_inventory import _decompose_packages
+
+    with pd.option_context("future.infer_string", False):
+        objects = pd.DataFrame([
+            {"OWNER": "APP_OWNER", "OBJECT_NAME": "GET_ORDER", "OBJECT_TYPE": "PROCEDURE", "STATUS": "VALID"},
+        ])
+        arguments = pd.DataFrame([
+            {"OWNER": "APP_OWNER", "PACKAGE_NAME": float("nan"), "OBJECT_NAME": "GET_ORDER",
+             "OVERLOAD": float("nan"), "ARGUMENT_NAME": "P_ID", "POSITION": 1,
+             "DATA_TYPE": "NUMBER", "PLS_TYPE": float("nan"), "IN_OUT": "IN"},
+        ])
+        sources = pd.DataFrame(columns=["OWNER", "NAME", "TYPE", "LINE", "TEXT"])
+
+        result = _decompose_packages(objects, sources, arguments)
+
+    assert list(result["SP_ID"]) == ["APP_OWNER.GET_ORDER"]
+    assert result.iloc[0]["TYPE"] == "PROCEDURE"
+
+
+def test_remote_ref_count_ignores_nan_link_under_classic_pandas_dtype() -> None:
+    from sp_assessor.stages.s1_inventory import _compute_remote_ref_count
+
+    with pd.option_context("future.infer_string", False):
+        inventory = pd.DataFrame([
+            {"SP_ID": "APP_OWNER.GET_ORDER", "OWNER": "APP_OWNER", "PKG": "", "NAME": "GET_ORDER"},
+        ])
+        deps = pd.DataFrame([
+            {"OWNER": "APP_OWNER", "NAME": "GET_ORDER", "REFERENCED_OWNER": "APP_OWNER",
+             "REFERENCED_NAME": "ORDERS", "REFERENCED_TYPE": "TABLE", "REFERENCED_LINK_NAME": float("nan")},
+        ])
+        result = _compute_remote_ref_count(inventory, deps)
+
+    assert result.iloc[0]["REMOTE_REF_COUNT"] == 0
+
+
+def test_build_unresolved_ignores_nan_link_under_classic_pandas_dtype() -> None:
+    from sp_assessor.stages.s1_inventory import _build_unresolved
+
+    with pd.option_context("future.infer_string", False):
+        deps = pd.DataFrame([
+            {"OWNER": "APP_OWNER", "NAME": "GET_ORDER", "REFERENCED_OWNER": "APP_OWNER",
+             "REFERENCED_NAME": "ORDERS", "REFERENCED_TYPE": "TABLE", "REFERENCED_LINK_NAME": float("nan")},
+        ])
+        objects = pd.DataFrame([
+            {"OWNER": "APP_OWNER", "OBJECT_NAME": "GET_ORDER", "OBJECT_TYPE": "PROCEDURE", "STATUS": "VALID"},
+        ])
+        result = _build_unresolved(deps, pd.DataFrame(), objects, ["APP_OWNER"])
+
+    assert result.empty  # 실제 DB Link 참조가 없으므로 UNRESOLVED_REMOTE 가 나오면 안 됨

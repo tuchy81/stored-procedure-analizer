@@ -66,7 +66,12 @@ def _decompose_packages(objects: pd.DataFrame, sources: pd.DataFrame,
             })
 
     if not arguments.empty:
-        pkg_args = arguments[arguments["PACKAGE_NAME"].astype(str).str.len() > 0]
+        # NOTE: `.astype(str).str.len() > 0` 는 NaN -> "nan" 변환 여부가 pandas 버전/문자열
+        # dtype 백엔드에 따라 달라지는 미정의 동작에 의존해 위험함 (일부 환경에서 NaN 이
+        # "nan" 문자열로 바뀌어 길이>0 이 되면서 비-패키지 인자 행까지 잘못 포함되어
+        # 이후 _make_sp_id 에서 NaN(float) 을 문자열 join 하려다 TypeError 발생).
+        # NaN-안전한 clean_str() 로 명시적으로 판정한다.
+        pkg_args = arguments[arguments["PACKAGE_NAME"].map(lambda v: bool(clean_str(v)))]
         seen: set[tuple] = set()
         for _, arg in pkg_args.iterrows():
             key = (arg["OWNER"], arg["PACKAGE_NAME"], arg["OBJECT_NAME"], clean_str(arg.get("OVERLOAD")))
@@ -203,7 +208,7 @@ def _compute_remote_ref_count(inventory: pd.DataFrame, deps: pd.DataFrame,
     lookup: dict[tuple, int] = {}
 
     if not deps.empty and "REFERENCED_LINK_NAME" in deps.columns:
-        remote_deps = deps[deps["REFERENCED_LINK_NAME"].astype(str).str.len() > 0]
+        remote_deps = deps[deps["REFERENCED_LINK_NAME"].map(lambda v: bool(clean_str(v)))]
         if not remote_deps.empty:
             counts = remote_deps.groupby(["OWNER", "NAME"]).size().rename("cnt").reset_index()
             for _, r in counts.iterrows():
@@ -303,7 +308,7 @@ def _build_unresolved(deps: pd.DataFrame, synonyms: pd.DataFrame,
         return (owner, name) in remote_objects.get(link, set())
 
     if not deps.empty and "REFERENCED_LINK_NAME" in deps.columns:
-        remote = deps[deps["REFERENCED_LINK_NAME"].astype(str).str.len() > 0]
+        remote = deps[deps["REFERENCED_LINK_NAME"].map(lambda v: bool(clean_str(v)))]
         for _, r in remote.iterrows():
             link = r["REFERENCED_LINK_NAME"]
             if _remote_resolved(link, r["REFERENCED_OWNER"], r["REFERENCED_NAME"]):
