@@ -1,0 +1,63 @@
+# sqlscore 가중치/밴드 설정 예시 (선택) — 미지정 항목은 기본값을 그대로 사용.
+# 사용: sql-scorer --src <폴더> --config examples/sql/scoring_config.yaml
+
+# 참조 종류별 1건당 가산점 (의존성 성분)
+ref_weights:
+  TABLE: 1.0
+  SEQUENCE: 0.5
+  BUILTIN: 2.0
+  PACKAGE: 3.0
+  CALL: 4.0
+  GRANT: 3.0
+  REMOTE: 8.0
+  DB_LINK: 10.0
+
+# 복잡도 성분 가중치 (1건당)
+complexity:
+  branch: 1.0
+  loop: 2.0
+  query: 1.0
+  query_nesting: 3.0
+  dml: 1.0
+  dynamic_sql: 5.0
+  exception_handler: 1.5
+  when_others: 2.0
+  subprogram: 1.0
+
+# 절대점수(전환 난이도, fan-out) = volume·w + complexity·w + dependency·w
+composite:
+  volume: 1.0
+  complexity: 1.0
+  dependency: 1.0
+
+# 영향도(파급도, fan-in) — 별도 축. 많이 호출될수록/외부 노출될수록 변경 파급이 큼.
+impact:
+  call_in: 4.0        # 들어오는 프로시저·함수 호출 1건당
+  package_in: 3.0     # 들어오는 패키지 참조 1건당
+  grant_exposure: 3.0 # GRANT 수신자 1명당 (스캔 밖 외부 소비자)
+
+# 최종 단일점수(0~100) = 정규화(전환난이도)·정규화(영향도) 결합
+final:
+  method: weighted_sum  # weighted_sum(가중합) | geometric(둘 다 높아야 상위)
+  normalize: rank       # rank(순위, 이상치 강건) | minmax(크기 보존)
+  w_conversion: 0.7     # 전환난이도 가중 (실제 작업량은 전환이 지배)
+  w_impact: 0.3         # 영향도 가중 (파급이 큰 허브를 끌어올림)
+
+# 표본 기반 공수(Man-hour) 추정 — --effort-sample <KEY,HOURS CSV> 와 함께 사용
+effort:
+  method: band          # band(밴드별 평균+보간) | linear(점수 회귀) | ratio(점당 비례)
+  feature: absolute     # 회귀 피처(크기量): absolute | loc | complexity | dependency
+  p90_multiplier: 1.5   # 표본 부족 밴드의 P90 = P50 × 이 값
+  impact_buffer: 0.3    # P90 추가버퍼 = ×(1 + impact_buffer·정규화영향도) — base엔 미반영
+  fixed_overhead_hours: 0    # 프로젝트 고정 셋업(총합에 1회)
+  per_object_overhead_pct: 0 # per-object 통합/테스트 오버헤드(%)
+  unit: MH              # 표기 단위(MH/MD 등)
+
+loc_divisor: 10.0   # volume_score = LOC / loc_divisor
+
+# 난이도 밴드 (절대점수 오름차순 상한; 마지막은 그 이상)
+band_thresholds:
+  - {upper: 20, label: 낮음}
+  - {upper: 50, label: 보통}
+  - {upper: 100, label: 높음}
+  - {upper: inf, label: 매우높음}

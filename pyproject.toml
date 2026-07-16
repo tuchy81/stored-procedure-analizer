@@ -21,17 +21,18 @@ dependencies = [
 
 [project.optional-dependencies]
 scoring = ["scikit-learn>=1.4", "numpy>=1.26", "scipy>=1.11"]
-viz = ["matplotlib>=3.8", "openpyxl>=3.1"]
+viz = ["matplotlib>=3.8", "numpy>=1.26", "openpyxl>=3.1"]
 # leiden 커뮤니티 탐지 선택 시에만 필요 (default "louvain" 은 networkx 내장 구현 사용)
 community = ["python-igraph>=0.11", "leidenalg>=0.10"]
 dev = ["pytest>=8.0", "pytest-cov>=4.1", "ruff>=0.4"]
 
 [project.scripts]
 sp-assessor = "sp_assessor.cli.main:app"
+sql-scorer = "sqlscore.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["sp_assessor*"]
+include = ["sp_assessor*", "sqlscore*"]
 
 [tool.ruff]
 line-length = 120

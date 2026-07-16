@@ -8,3 +8,10 @@ build/
 dist/
 examples/output/
 examples/logs/
+# sqlscore 생성 산출물(재현 가능) — 소스(.sql/*.csv/config)만 추적
+examples/sql/charts/
+examples/sql/_csv/
+examples/sql/sql_difficulty_report.*
+examples/sql_mixed/charts/
+examples/sql_mixed/_csv/
+examples/sql_mixed/sql_difficulty_report.*

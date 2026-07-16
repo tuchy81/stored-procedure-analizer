@@ -62,6 +62,21 @@ sp-assessor run --stage all --root examples --tag demo
 | `sp-assessor diff --stage s1..s4 --from --to` | 스냅샷 간 신규/삭제/전략변경/공수변동 비교 |
 | `sp-assessor override lint` | override 파일 중복 SP_ID·상충 ACTION·REASON 누락 검사 |
 
+## 부가 도구: sql-scorer (.sql 직접 스캔 난이도 평가)
+
+CSV 추출본이 아니라 **`.sql` 파일 폴더만으로** DB 프로그램(SP/Procedure/Function/Package/Trigger)의
+복잡도·의존성 기반 난이도를 수치화하고 Markdown 리포트를 산출하는 **독립 실행 프로그램**입니다.
+
+```bash
+sql-scorer --src ./db_sql --out ./report.md            # 기본 가중치
+sql-scorer --src examples/sql --out examples/sql/sql_difficulty_report.md
+```
+
+오브젝트 식별 → 참조 종류(테이블/호출/패키지/DB링크/GRANT/빌트인/시퀀스)별 가산점수 →
+코드분량(LOC)·분기/루프/서브쿼리 중첩·동적SQL·예외 복잡도 → 절대점수/난이도 밴드 →
+참조 관계(Mermaid) + 점수 근거 리포트. 상세는
+[`SQL난이도평가_사용매뉴얼.md`](./SQL난이도평가_사용매뉴얼.md) 참조.
+
 ## 프로젝트 구조
 
 ```
@@ -71,7 +86,18 @@ sp_assessor/
 ├── io/                   # CSV 스키마 정의, 로드/저장
 ├── stages/               # s1_inventory ~ s5_report, spike, diff, override_lint, validate
 └── util/                 # 공용 유틸 (NaN-안전 문자열 정규화 등)
+sqlscore/                 # 부가 도구: .sql 직접 스캔 난이도 평가 (sql-scorer)
+├── cli.py               # Typer CLI 진입점
+├── parser.py            # .sql 스캔·오브젝트 식별·본문 경계
+├── metrics.py           # LOC/분기/루프/서브쿼리/동적SQL/예외 지표
+├── dependencies.py      # 참조 종류별 의존성 분석
+├── scoring.py           # 가산점수 + 절대점수 + 영향도 + 최종점수
+├── effort.py            # 표본 캘리브레이션 공수(P50/P90) 추정
+├── viz.py               # 점수 산포·공수 캘리브레이션·신뢰구간 차트(matplotlib, optional)
+├── report.py            # Markdown 리포트
+└── htmlreport.py        # MD→HTML(섹션 이동/확장) 변환
 examples/                 # 최소 재현용 입력 데이터 + config.yaml (테스트 픽스처 겸용)
+examples/sql/             # sql-scorer 예시 .sql + 샘플 리포트/설정
 tests/                    # pytest — 각 stage end-to-end 검증
 ```
 
